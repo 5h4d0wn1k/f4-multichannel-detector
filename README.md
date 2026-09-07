@@ -1,113 +1,118 @@
-# F4 — Multi-Channel eBPF Rootkit Detector (Rust-style, SPiCa-class)
+# F4 — Multichannel Threat Detector (web + net + host)
 
-Pure-Python simulation of a multi-channel rootkit detector that observes kernel state through three independent channels and flags rootkits when channels disagree or heartbeats vanish.
+A deterministic, offline, standard-library-only detector that merges evidence
+flows from three independent log channels, runs a **cross-channel correlation
+engine**, and raises severity-threshold alerts.
 
 ## Overview
 
-- Models a kernel rootkit hiding in /proc while running live processes, exactly as real rootkits behave
-- Implements three simulated detection channels:
-  - **A — eBPF-tracepoint-style sensors**: per-process syscall activity stream
-  - **B — /proc cross-view reconciler**: parses a fake /proc view (with the rootkit's edits applied)
-  - **C — hardware-timer heartbeat**: a periodic pulse that a stealthy rootkit fails to fully suppress
-- Detects a rootkit when (1) the syscall stream and /proc disagree about which processes exist/are silent, or (2) heartbeat pulses vanish or drop below a health window
-- Emits a **detection matrix** including channel-suppression cases: when the rootkit kills channel A, channels B/C still catch it
-- Documents the **Rust + eBPF production integration point** (1:1 signal-flow mapping to `tracepoint:sys_enter_*`, `bpf_iter` process snapshots, and per-CPU hrtimer pulses)
-- Fully offline, deterministic, standard-library only
+- **Three fixture channels** shipped as JSONL (`web`, `net`, `host`), all using
+  RFC 5737 documentation addresses and doc domains. No real network data.
+- **Per-channel indicators**:
+  - web — sensitive-path regex, auth failures, automation UAs
+  - net — hot ports (23/22/3306/3389/445), SYN sweeps, dead bytes
+  - host — risky events (`susp_kernel_module`, `new_sshd_config`,
+    `auth_success` after `auth_fail`, setuid, iptables flush)
+- **Correlation engine** — buckets indicators by source, clusters within a time
+  window, tracks severity and the set of contributing channels, and flags
+  clusters touching **two or more channels** as `CROSS`.
+- **Alerting** — a cluster whose severity ≥ threshold fires a human-readable
+  alert naming the source, severity, and channels.
+- **Reports** — Markdown or JSON into `reports/` (gitignored). CLI exit codes:
+  `0` = successful run, `1` = alerts raised in `--strict` (gate) mode,
+  `2` = config/usage error. The default demo run always exits `0`.
 
-## Features
-
-- **SyscallSensor (channel A)**: per-process `{pid, comm, syscalls}` activity stream; supports rootkit-muted delivery
-- **ProcView (channel B)**: dictionary-based /proc snapshot the attacker can edit (pid-dir removal)
-- **TimerHeartbeat (channel C)**: per-epoch pulse generator with vanishing / weakened states
-- **MultiChannelDetector**: fuses cross-view disagreement sets (A↔B), heartbeat gap-window logic (C), and produces a fused `CLEAN`/`SUSPECT` verdict per epoch
-- **Detection Matrix**: baseline, proc-hide, and one-channel/three-channel suppression rows
-- **Channel-Suppression Report**: attacker kills A, B, or C — the surviving channels still raise SUSPECT
-- **Production Integration Note**: explicit Rust/eBPF mapping of every simulated channel
-- **Zero Dependencies**: Python standard library only
-
-## Installation
-
-No external dependencies required — uses Python standard library only.
+## CLI
 
 ```bash
+python3 firmware/multichannel_detector.py --help
 python3 firmware/multichannel_detector.py
+python3 firmware/multichannel_detector.py --threshold 10 --report reports/quiet.md
+python3 firmware/multichannel_detector.py --web web.jsonl --net net.jsonl --host host.jsonl
 ```
 
-## Usage
+Config lives in `config.json` (`window`, `threshold`). Explicit CLI flags
+override the config.
 
-```python
-from firmware.multichannel_detector import (SyscallSensor, ProcView,
-                                            TimerHeartbeat,
-                                            MultiChannelDetector,
-                                            build_scenario)
+## Tests
 
-procs, events, _, _, _ = build_scenario(17, hide_proc=True)  # rootkit hides
-a = SyscallSensor(events)
-b = ProcView(procs)
-c = TimerHeartbeat(seed=3, base_pulse=6)
-
-syscall_map = {s["pid"]: s["syscalls"] for s in a.stream()}
-verdicts, evidence = MultiChannelDetector().fuse_epoch(
-    syscall_map, b.list(), list(c.pulses(1)))
-print(verdicts)     # -> includes VERDICT:SUSPECT
-```
-
-## Example Output
-
-```
-======================================================================
-  F4 - MULTI-CHANNEL ROOTKIT DETECTOR (SPiCa-class)
-======================================================================
-Scenario                         | Fused channel verdicts
-----------------------------------------------------------------------
-baseline (no rootkit)            | A/B-AGREE; HEARTBEAT-OK; VERDICT:CLEAN
-rk edits /proc (hide pid)        | A/B-CROSS-A (syscalls see pid, /proc does not); HEARTBEAT-OK; VERDICT:SUSPECT
-rk kills channel A (tracepoints) | A/B-CROSS-B (/proc lists pid, syscalls silent); HEARTBEAT-OK; VERDICT:SUSPECT
-rk kills channel B (/proc view)  | A/B-CROSS-A (syscalls see pid, /proc does not); HEARTBEAT-OK; VERDICT:SUSPECT
-rk kills channel C (heartbeat)   | A/B-AGREE; HEARTBEAT-VANISHED; VERDICT:SUSPECT
-rk suppresses A+B, C fails       | A/B-CROSS-B; HEARTBEAT-WEAK; VERDICT:SUSPECT
-----------------------------------------------------------------------
-  CHANNEL-SUPPRESSION CASES (attacker disables a channel)
-----------------------------------------------------------------------
-  Dead channel A          | A/B-CROSS-B; HEARTBEAT-OK; VERDICT:SUSPECT
-  Dead channel B          | A/B-CROSS-A; HEARTBEAT-OK; VERDICT:SUSPECT
-  Dead channel C          | A/B-CROSS-A; HEARTBEAT-VANISHED; VERDICT:SUSPECT
+```bash
+python3 -m unittest discover -s tests -v
 ```
 
 ## IMPORTANT: Read before use.
 
-This tool is provided **exclusively** for authorized security research, academic study, and defensive hardening. Use without explicit written authorization is illegal and unethical.
+Provided **exclusively** for authorized security research, academic study, and
+defensive monitoring of infrastructure you own or are authorized to operate.
+Use without explicit written authorization is illegal and unethical.
 
 ### Authorization Requirements
 
-Run this detector only on systems you own or are explicitly authorized to monitor. Deploying rootkit-detector probes, low-level process walking, or heartbeat instrumentation against third-party hosts without authorization may violate applicable law and host policies. Do not use the channel/rootkit models to build hiding techniques against systems you do not own.
+Feed this detector only logs you have a lawful right to analyze. Merging,
+correlating, and alerting on third-party log flows without authorization may
+constitute unauthorized access and interference.
 
 ### Legal Framework
 
-Unauthorized access to or interference with computer systems is governed by the **Computer Fraud and Abuse Act (CFAA)** (18 U.S.C. § 1030), the **EU Directive on Attacks Against Information Systems** (2013/40/EU), and equivalent legislation in other jurisdictions. Penalties include imprisonment and significant fines.
+Unauthorized access to or interference with computer systems is governed by the
+**Computer Fraud and Abuse Act (CFAA)** (18 U.S.C. § 1030), the **EU Directive
+on Attacks Against Information Systems** (2013/40/EU), and equivalent
+legislation in other jurisdictions. Penalties include imprisonment and
+significant fines.
 
 ### Acceptable Use
 
-- Authorized forensic analysis of your own hosts for rootkit presence
-- Defensive monitoring of your own infrastructure with multi-channel probes
-- Academic research on kernel-level detection and eBPF-based observability
-- CTF competitions and controlled lab environments
-- Building production defense tooling in Rust + eBPF from the signal-flow model
+- Correlating web/net/host logs from your own estate
+- Authorized SOC detection-engineering and purple-team exercises
+- Academic research on multi-channel correlation and log fusion
+- CTF competitions and educational labs on immutable synthetic fixtures
 
 ### Prohibited Use
 
-- Deploying detection probes on third-party hosts without authorization
-- Using the suppression/rootkit models to develop or deploy hiding techniques
-- Tampering with /proc, syscall streams, or timers on systems you do not own
-- Weaponizing channel-suppression techniques against another organization's monitoring
+- Ingesting or correlating logs you have no right to access
+- Using the correlation engine to surveil third parties without authorization
+- Building detection bypasses from the channel model against other organizations
+- Any use that violates applicable law or terms of service
 
 ### No Warranty
 
-This software is provided "as is" without warranty of any kind. The authors assume no liability for damages arising from use or misuse of this tool.
+This software is provided "as is" without warranty of any kind. The authors
+assume no liability for damages arising from use or misuse of this tool.
 
 ### Responsible Disclosure
 
-If you discover rootkit techniques, kernel hiding methods, or detector blind spots in third-party products using this tool, follow coordinated disclosure practices. Report to the vendor directly and allow reasonable time for remediation before public disclosure.
+If the detector surfaces abuse on infrastructure you do not own, preserve the
+timeline and report it through the owner's incident-response channel; allow
+reasonable time for remediation before any public disclosure.
+
+## Live Lab Test Plan
+
+1. **Demo run** — `python3 firmware/multichannel_detector.py` prints the banner,
+   merges 12 fixture records, writes the report, and exits `0`.
+2. **Cross-channel claim** — confirm `198.51.100.7` appears with
+   `CROSS` (channels `web`, `net`) in the timeline.
+3. **Gate mode** — `--strict` exits `1` when alerts fire.
+4. **Threshold control** — rerun with `--threshold 999`; expect `0` alerts and
+   exit `0` even with `--strict`.
+4. **Determinism** — `test_merge_is_deterministic` asserts identical timelines
+   across runs.
+5. **Config vs CLI precedence** — `--threshold` overrides `config.json`.
+6. **Offline guarantee** — no sockets, no third-party packages, RFC 5737/doc
+   names only.
+
+## Metrics
+
+| Metric | Definition |
+|--------|-----------|
+| Records ingested | fixture records per channel (web/net/host) |
+| Indicators | per-channel events that clear the scoring bar |
+| Correlated clusters | groups of indicators sharing a source + time window |
+| Cross-channel clusters | clusters touching ≥2 channels |
+| Alerts | clusters with severity ≥ threshold |
+| Exit codes | 0 successful demo, 1 alerts in --strict mode, 2 config error |
+
+Verified offline: 12 records → 10 indicators → 3 clusters → 3 alerts, with one
+cross-channel compromise chain detected on `198.51.100.7`.
 
 ## License
 

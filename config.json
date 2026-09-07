@@ -1,0 +1,5 @@
+{
+  "window": 120,
+  "threshold": 6,
+  "alert_on_cross_channel_only": false
+}
